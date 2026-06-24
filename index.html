@@ -862,46 +862,103 @@ function speakSentence() {
 }
 
 function setupSentRecognition() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR || micUnavailable) return;
-  sentRecognition = new SR();
-  sentRecognition.lang = 'en-US'; sentRecognition.continuous = false; sentRecognition.interimResults = false;
-  sentRecognition.onresult = (e) => {
-    const spoken = e.results[0][0].transcript.trim();
-    document.getElementById('sentMicResult').textContent = `認識: "${spoken}"`;
-    document.getElementById('sentMicStatus').textContent = 'AI評価中...';
-    setSentRecording(false);
-    evaluateSentenceWithClaude(spoken);
-  };
-  sentRecognition.onerror = (err) => {
-    setSentRecording(false);
-    if (err.error === 'not-allowed' || err.error === 'service-not-allowed') {
-      document.getElementById('sentMicArea').style.display = 'none';
-      document.getElementById('sentTextFallback').style.display = 'block';
-    } else {
-      document.getElementById('sentMicStatus').textContent = '認識できませんでした';
-    }
-  };
-  sentRecognition.onend = () => setSentRecording(false);
+  // Azure SDKを使うため個別セットアップ不要
 }
 
+let azureSentRecognizer = null;
+
 function toggleSentRecording() {
-  if (!sentRecognition || micUnavailable) {
+  if (micUnavailable || typeof SpeechSDK === 'undefined') {
     document.getElementById('sentMicArea').style.display = 'none';
     document.getElementById('sentTextFallback').style.display = 'block';
     return;
   }
-  if (isSentRecording) { sentRecognition.stop(); setSentRecording(false); }
-  else {
+  if (isSentRecording) {
+    if (azureSentRecognizer) {
+      try { azureSentRecognizer.close(); } catch(e) {}
+      azureSentRecognizer = null;
+    }
+    setSentRecording(false);
+    document.getElementById('sentEvalLoading').style.display = 'none';
+    document.getElementById('sentMicStatus').textContent = 'キャンセルしました';
+  } else {
     document.getElementById('sentMicResult').textContent = '';
     document.getElementById('sentScoreWrap').style.display = 'none';
     document.getElementById('sentMicStatus').textContent = '🔴 録音中... 例文を音読してください';
     setSentRecording(true);
-    try { sentRecognition.start(); } catch(e) {
+    document.getElementById('sentEvalLoading').style.display = 'flex';
+    startAzureSentenceAssessment();
+  }
+}
+
+async function startAzureSentenceAssessment() {
+  if (!currentSentence) return;
+
+  try {
+    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(AZURE_SPEECH_KEY, AZURE_SPEECH_REGION);
+    speechConfig.speechRecognitionLanguage = 'en-US';
+
+    const pronConfig = new SpeechSDK.PronunciationAssessmentConfig(
+      currentSentence.en,
+      SpeechSDK.PronunciationAssessmentGradingSystem.HundredMark,
+      SpeechSDK.PronunciationAssessmentGranularity.Word,
+      true
+    );
+
+    const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+    const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+    pronConfig.applyTo(recognizer);
+    azureSentRecognizer = recognizer;
+
+    recognizer.recognizeOnceAsync(result => {
       setSentRecording(false);
-      document.getElementById('sentMicArea').style.display = 'none';
-      document.getElementById('sentTextFallback').style.display = 'block';
-    }
+      azureSentRecognizer = null;
+
+      if (result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+        const spoken = result.text.replace(/\.$/, '').trim();
+        document.getElementById('sentMicResult').textContent = `認識: "${spoken}"`;
+
+        const pronResult = SpeechSDK.PronunciationAssessmentResult.fromResult(result);
+        const score = Math.round(pronResult.pronunciationScore);
+        const accuracy = Math.round(pronResult.accuracyScore);
+        const fluency = Math.round(pronResult.fluencyScore);
+        const completeness = Math.round(pronResult.completenessScore);
+
+        let badge;
+        if (score >= 85) badge = '🌟 Perfect!';
+        else if (score >= 65) badge = '👍 Good!';
+        else if (score >= 45) badge = '🙂 OK';
+        else badge = '🔁 Try again';
+
+        let advice = '';
+        if (completeness < 80) advice += `文の${100 - completeness}%が抜けています。全単語を読むよう意識してください。`;
+        if (fluency < 70) advice += (advice ? ' ' : '') + '流暢さが低めです。自然なリズムで読む練習をしましょう。';
+        if (accuracy < 70) advice += (advice ? ' ' : '') + '正確さに問題があります。各単語の発音を確認してください。';
+
+        const comment = score >= 65 ? 'よく読めています！' : 'もう一度例文を音読してみよう';
+        document.getElementById('sentEvalLoading').style.display = 'none';
+        applySentResult(score, badge, comment, advice);
+      } else if (result.reason === SpeechSDK.ResultReason.NoMatch) {
+        document.getElementById('sentEvalLoading').style.display = 'none';
+        document.getElementById('sentMicStatus').textContent = '音声を認識できませんでした。もう一度試してください';
+      } else {
+        document.getElementById('sentEvalLoading').style.display = 'none';
+        document.getElementById('sentMicStatus').textContent = 'エラーが発生しました。もう一度試してください';
+      }
+      recognizer.close();
+    }, error => {
+      console.error('Azure sentence error:', error);
+      setSentRecording(false);
+      azureSentRecognizer = null;
+      document.getElementById('sentEvalLoading').style.display = 'none';
+      document.getElementById('sentMicStatus').textContent = 'マイクエラー。もう一度試してください';
+    });
+
+  } catch(e) {
+    console.error('Azure sentence setup error:', e);
+    setSentRecording(false);
+    document.getElementById('sentMicArea').style.display = 'none';
+    document.getElementById('sentTextFallback').style.display = 'block';
   }
 }
 
@@ -925,37 +982,23 @@ async function evaluateSentenceWithClaude(spoken) {
   document.getElementById('sentScoreWrap').style.display = 'none';
 
   try {
-    const prompt = `You are an extremely strict English sentence pronunciation judge for Japanese junior high school students.
+    const prompt = `You are a supportive English pronunciation coach for Japanese junior high school students.
 
 Target sentence: "${currentSentence.en}"
-Recognized speech: "${spoken}"
+What the student typed/said: "${spoken}"
 
-Speech recognition tends to "clean up" non-native pronunciation. Assume errors exist even if text looks close.
+Evaluate pronunciation based on how the text would sound if spoken. Be encouraging but honest.
 
-START from 100, subtract for every error found:
+Score 0-100:
+- 85-100: excellent reading
+- 65-84: good with minor issues
+- 45-64: recognizable but needs work
+- 0-44: significant improvement needed
 
-PER-WORD PENALTIES:
-- s/sh confusion in any word → -25pts per word
-- th sound → -20pts per "th" word (Japanese can't do /θ/ /ð/)
-- r/l confusion → -20pts per word
-- Final consonant dropped → -20pts per word
-- Katakana vowel insertion → -20pts per word
-- Wrong vowel quality → -15pts per word
-- /v/→/b/ → -15pts per word
-
-SENTENCE-LEVEL:
-- Missing word → -15pts each
-- Wrong word order → -20pts
-- Unnatural rhythm/grouping → -10pts
-- Flat/no intonation → -10pts
-
-FLOOR: minimum 5pts.
-
-Thresholds: 88-100 "🌟 Perfect!" / 65-87 "👍 Good!" / 40-64 "🙂 OK" / 5-39 "🔁 Try again"
-Average Japanese student = 30-50pts on a sentence.
+Consider missing words, pronunciation issues common for Japanese learners, fluency.
 
 Respond ONLY as JSON:
-{"score":45,"badge":"🙂 OK","comment":"全体的に読めていますが改善点があります","advice":"具体的に：〇〇という単語の△△の音が正しくありません。××を意識して練習してください。（日本語で）"}`;
+{"score":65,"badge":"👍 Good!","comment":"よく読めています","advice":"改善点を日本語で。問題なければ空文字でOK"}`;
 
     const text = await callGemini(prompt);
     const result = JSON.parse(text);
