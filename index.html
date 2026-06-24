@@ -545,23 +545,28 @@ const AZURE_SPEECH_REGION = 'eastus';
 let azureRecognizer = null;
 
 // ============================================================
-//  GEMINI API（例文生成・例文評価のみ使用）
+//  GROQ API（例文生成・テキスト評価に使用）
 // ============================================================
-const GEMINI_API_KEY = 'AQ.Ab8RN6KR94s6yO1pMKzsapLwSaA0qsdJyPOomkDTSV8OVNlWHA';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+const GROQ_API_KEY = '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';
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
-async function callGemini(prompt) {
-  const res = await fetch(GEMINI_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
+async function callGroq(prompt) {
+  const res = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${GROQ_API_KEY}`
+    },
     body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: "application/json" }
+      model: 'llama-3.1-8b-instant',
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.7,
+      max_tokens: 300,
+      response_format: { type: 'json_object' }
     })
   });
   const data = await res.json();
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  return text.replace(/```json|```/g, '').trim();
+  return data.choices?.[0]?.message?.content || '';
 }
 
 // ============================================================
@@ -765,7 +770,7 @@ Respond ONLY as JSON, no markdown:
 {"score":70,"badge":"👍 Good!","comment":"よく発音できています","advice":"具体的な改善点を日本語で。問題なければ空文字でOK"}`;
 
 
-    const clean = await callGemini(prompt);
+    const clean = await callGroq(prompt);
     const result = JSON.parse(clean);
 
     showEvalLoading(false);
@@ -859,7 +864,7 @@ async function loadSentence(word) {
 Requirements: very short (8-12 words), simple vocabulary, natural and useful daily life sentence. The word "${word.e}" must appear.
 Respond ONLY in JSON: {"en": "I eat an apple every morning.", "ja": "私は毎朝りんごを食べます。"}`;
 
-    const text = await callGemini(prompt);
+    const text = await callGroq(prompt);
     currentSentence = JSON.parse(text);
 
     document.getElementById('sentenceLoading').style.display = 'none';
@@ -1044,7 +1049,7 @@ Consider missing words, pronunciation issues common for Japanese learners, fluen
 Respond ONLY as JSON:
 {"score":65,"badge":"👍 Good!","comment":"よく読めています","advice":"改善点を日本語で。問題なければ空文字でOK"}`;
 
-    const text = await callGemini(prompt);
+    const text = await callGroq(prompt);
     const result = JSON.parse(text);
     document.getElementById('sentEvalLoading').style.display = 'none';
     applySentResult(result.score, result.badge, result.comment, result.advice);
