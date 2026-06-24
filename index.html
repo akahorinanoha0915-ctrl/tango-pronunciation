@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>中学英単語クイズ</title>
+<script src="https://aka.ms/csspeech/jsbrowserpackageraw"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap');
 
@@ -537,7 +538,14 @@ const WORDS = [
 ];
 
 // ============================================================
-//  GEMINI API
+//  AZURE SPEECH - PRONUNCIATION ASSESSMENT
+// ============================================================
+const AZURE_SPEECH_KEY = 'DQfmXn3gZIV6kD8J84j4NXgV1fGzyTY3zIztESb35hjz8VKfqx8pJQQJ99CFACYeBjFXJ3w3AAAYACOGdtq5';
+const AZURE_SPEECH_REGION = 'eastus';
+let azureRecognizer = null;
+
+// ============================================================
+//  GEMINI API（例文生成・例文評価のみ使用）
 // ============================================================
 const GEMINI_API_KEY = 'AQ.Ab8RN6KR94s6yO1pMKzsapLwSaA0qsdJyPOomkDTSV8OVNlWHA';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
@@ -605,63 +613,88 @@ function init() {
 let micUnavailable = false;
 
 async function setupSpeechRecognition() {
-  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) {
+  if (typeof SpeechSDK === 'undefined') {
     micUnavailable = true;
-    return;
   }
+}
 
-  // Permissions API でマイク許可を事前チェック（非対応ブラウザでは skip）
-  if (navigator.permissions) {
-    try {
-      const status = await navigator.permissions.query({ name: 'microphone' });
-      if (status.state === 'denied') {
-        micUnavailable = true;
-        return;
-      }
-      // 'prompt' or 'granted' → 続行
-    } catch (e) { /* permissions API 非対応 → 続行 */ }
-  }
+async function startAzurePronunciationAssessment() {
+  const w = quizWords[currentIdx];
 
-  // iOS Safari は SpeechRecognition があっても not-allowed になりやすいので
-  // 実際に一度テスト起動してエラーなら即フォールバック
-  try {
-    const testRec = new SpeechRecognition();
-    testRec.lang = 'en-US';
-    testRec.onerror = (e) => {
-      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
-        micUnavailable = true;
-      }
-    };
-    // テストは実行しない（エラーハンドラ登録のみ）
-  } catch(e) {
+  if (typeof SpeechSDK === 'undefined') {
     micUnavailable = true;
-    return;
-  }
-
-  recognition = new SpeechRecognition();
-  recognition.lang = 'en-US';
-  recognition.continuous = false;
-  recognition.interimResults = false;
-
-  recognition.onresult = (e) => {
-    const spoken = e.results[0][0].transcript.toLowerCase().trim();
-    document.getElementById('micResult').textContent = `認識: "${spoken}"`;
-    document.getElementById('micStatus').textContent = 'AI採点中...';
-    setRecording(false);
-    evaluateWithClaude(spoken);
-  };
-  recognition.onerror = (err) => {
-    console.warn('SpeechRecognition error:', err.error);
-    setRecording(false);
-    if (err.error === 'not-allowed' || err.error === 'service-not-allowed') {
-      micUnavailable = true;
-    }
-    document.getElementById('micStatus').textContent = 'マイク認識できませんでした';
     document.getElementById('micArea').style.display = 'none';
     document.getElementById('textFallback').style.display = 'block';
-  };
-  recognition.onend = () => setRecording(false);
+    setRecording(false);
+    return;
+  }
+
+  try {
+    const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(AZURE_SPEECH_KEY, AZURE_SPEECH_REGION);
+    speechConfig.speechRecognitionLanguage = 'en-US';
+
+    const pronConfig = new SpeechSDK.PronunciationAssessmentConfig(
+      w.e,
+      SpeechSDK.PronunciationAssessmentGradingSystem.HundredMark,
+      SpeechSDK.PronunciationAssessmentGranularity.Word,
+      true
+    );
+
+    const audioConfig = SpeechSDK.AudioConfig.fromDefaultMicrophoneInput();
+    const recognizer = new SpeechSDK.SpeechRecognizer(speechConfig, audioConfig);
+    pronConfig.applyTo(recognizer);
+    azureRecognizer = recognizer;
+
+    recognizer.recognizeOnceAsync(result => {
+      setRecording(false);
+      azureRecognizer = null;
+
+      if (result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
+        const spoken = result.text.replace(/\.$/, '').toLowerCase().trim();
+        document.getElementById('micResult').textContent = `認識: "${spoken}"`;
+        document.getElementById('micStatus').textContent = 'Azure採点中...';
+
+        const pronResult = SpeechSDK.PronunciationAssessmentResult.fromResult(result);
+        const score = Math.round(pronResult.pronunciationScore);
+        const accuracy = Math.round(pronResult.accuracyScore);
+        const fluency = Math.round(pronResult.fluencyScore);
+
+        let badge;
+        if (score >= 85) badge = '🌟 Perfect!';
+        else if (score >= 65) badge = '👍 Good!';
+        else if (score >= 45) badge = '🙂 OK';
+        else badge = '🔁 Try again';
+
+        let advice = '';
+        if (accuracy < 70) advice += '正確さに問題があります。各音を丁寧に発音してください。';
+        if (fluency < 70) advice += (advice ? ' ' : '') + '流暢さを改善しましょう。自然なリズムで話してみてください。';
+
+        const comment = score >= 65 ? 'よく発音できています！' : `もう一度 "${w.e}" を練習しよう`;
+        showEvalLoading(false);
+        applyPronunResult(score, badge, comment, advice, spoken);
+      } else if (result.reason === SpeechSDK.ResultReason.NoMatch) {
+        showEvalLoading(false);
+        document.getElementById('micStatus').textContent = '音声を認識できませんでした。もう一度試してください';
+      } else {
+        showEvalLoading(false);
+        document.getElementById('micStatus').textContent = 'エラーが発生しました。もう一度試してください';
+      }
+      recognizer.close();
+    }, error => {
+      console.error('Azure error:', error);
+      setRecording(false);
+      showEvalLoading(false);
+      azureRecognizer = null;
+      document.getElementById('micStatus').textContent = 'マイクエラー。もう一度試してください';
+    });
+
+  } catch(e) {
+    console.error('Azure setup error:', e);
+    micUnavailable = true;
+    document.getElementById('micArea').style.display = 'none';
+    document.getElementById('textFallback').style.display = 'block';
+    setRecording(false);
+  }
 }
 
 // 発音セクション表示
@@ -687,44 +720,29 @@ function showPronunSection() {
   }
 }
 
-// ── Claude APIで発音評価 ──
+// ── テキスト入力フォールバック用の発音評価（Gemini）──
 async function evaluateWithClaude(spokenText) {
   const w = quizWords[currentIdx];
   showEvalLoading(true);
 
   try {
-    const prompt = `You are an extremely strict English pronunciation judge for Japanese junior high school students. Your job is to find errors, not to encourage.
+    const prompt = `You are a supportive English pronunciation coach for Japanese junior high school students.
 
 Target word: "${w.e}"  IPA: ${w.ph}
-Speech recognition output: "${spokenText}"
+What the student typed/said: "${spokenText}"
 
-IMPORTANT: Speech recognition for non-native speakers tends to "correct" mispronunciations toward the target word. So even if the recognized text looks close to the target, assume the actual pronunciation had errors. Do NOT give benefit of the doubt.
+Evaluate pronunciation based on how the typed text would sound if spoken. Be encouraging but honest.
 
-START from 100 and subtract:
+Score 0-100:
+- 85-100: near-native pronunciation
+- 65-84: good with minor issues
+- 45-64: recognizable but notable errors
+- 0-44: needs practice
 
-AUTOMATIC DEDUCTIONS — apply every matching one:
-- s/sh swap: target has /s/ but student likely said /ʃ/ or vice versa (very common for Japanese learners). Check if the word contains s or sh sounds. Deduct 30pts if confusion likely.
-- th → s/z/d: any "th" sound in target → deduct 25pts (Japanese speakers almost never produce /θ/ or /ð/ correctly).
-- r/l swap: any r or l in target → deduct 20pts unless proven correct.
-- Short vowel elongated (ベッド→"beedo", バッグ→"baggu"): deduct 25pts.
-- Final consonant dropped (test→"tes", book→"boo"): deduct 20pts per dropped consonant.
-- Stress on wrong syllable: deduct 25pts.
-- /v/→/b/ (very→"berry"): deduct 20pts.
-- /æ/ said as /a/ or /e/: deduct 15pts.
-- Extra syllables added (Japanese vowel insertion): deduct 20pts.
-
-FLOOR: minimum score is 5.
-
-THRESHOLDS (after deductions):
-- 88-100: "🌟 Perfect!" — genuinely native-like
-- 65-87: "👍 Good!" — clear but has real issues
-- 40-64: "🙂 OK" — recognizable with notable errors  
-- 5-39: "🔁 Try again" — significant problems
-
-A typical Japanese student attempting "${w.e}" should score 35-55. Scores above 75 should be very rare.
+Consider common Japanese learner issues (th sounds, r/l, vowel length, final consonants) but give credit when the student gets it right.
 
 Respond ONLY as JSON, no markdown:
-{"score":42,"badge":"🙂 OK","comment":"発音に複数の問題があります","advice":"[具体的に]〇〇の音が△△になっています。××に注意して練習してください。（日本語で）"}`;
+{"score":70,"badge":"👍 Good!","comment":"よく発音できています","advice":"具体的な改善点を日本語で。問題なければ空文字でOK"}`;
 
 
     const clean = await callGemini(prompt);
@@ -1083,27 +1101,26 @@ function speakWord() {
 }
 
 function toggleRecording() {
-  if (!recognition || micUnavailable) {
+  if (micUnavailable) {
     document.getElementById('micArea').style.display = 'none';
     document.getElementById('textFallback').style.display = 'block';
     return;
   }
   if (isRecording) {
-    recognition.stop();
+    if (azureRecognizer) {
+      try { azureRecognizer.close(); } catch(e) {}
+      azureRecognizer = null;
+    }
     setRecording(false);
+    showEvalLoading(false);
+    document.getElementById('micStatus').textContent = 'キャンセルしました';
   } else {
     document.getElementById('micResult').textContent = '';
     document.getElementById('pronunScoreWrap').style.display = 'none';
     document.getElementById('micStatus').textContent = '🔴 録音中... 英単語を発音してください';
     setRecording(true);
-    try {
-      recognition.start();
-    } catch(e) {
-      setRecording(false);
-      micUnavailable = true;
-      document.getElementById('micArea').style.display = 'none';
-      document.getElementById('textFallback').style.display = 'block';
-    }
+    showEvalLoading(true);
+    startAzurePronunciationAssessment();
   }
 }
 
