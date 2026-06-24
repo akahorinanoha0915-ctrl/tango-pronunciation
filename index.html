@@ -635,19 +635,6 @@ async function startAzurePronunciationAssessment() {
     return;
   }
 
-  // マイク許可を先に取得してからAzure認識を開始
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach(t => t.stop());
-  } catch(e) {
-    micUnavailable = true;
-    document.getElementById('micArea').style.display = 'none';
-    document.getElementById('textFallback').style.display = 'block';
-    setRecording(false);
-    showEvalLoading(false);
-    return;
-  }
-
   try {
     const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(AZURE_SPEECH_KEY, AZURE_SPEECH_REGION);
     speechConfig.speechRecognitionLanguage = 'en-US';
@@ -673,6 +660,12 @@ async function startAzurePronunciationAssessment() {
 
       if (result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
         const spoken = result.text.replace(/\.$/, '').toLowerCase().trim();
+        if (!spoken) {
+          showEvalLoading(false);
+          document.getElementById('micStatus').textContent = 'もう少し大きな声でもう一度試してください';
+          recognizer.close();
+          return;
+        }
         document.getElementById('micResult').textContent = `認識: "${spoken}"`;
         document.getElementById('micStatus').textContent = 'Azure採点中...';
 
@@ -927,18 +920,6 @@ function toggleSentRecording() {
 async function startAzureSentenceAssessment() {
   if (!currentSentence) return;
 
-  // マイク許可を先に取得
-  try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    stream.getTracks().forEach(t => t.stop());
-  } catch(e) {
-    setSentRecording(false);
-    document.getElementById('sentEvalLoading').style.display = 'none';
-    document.getElementById('sentMicArea').style.display = 'none';
-    document.getElementById('sentTextFallback').style.display = 'block';
-    return;
-  }
-
   try {
     const speechConfig = SpeechSDK.SpeechConfig.fromSubscription(AZURE_SPEECH_KEY, AZURE_SPEECH_REGION);
     speechConfig.speechRecognitionLanguage = 'en-US';
@@ -963,6 +944,12 @@ async function startAzureSentenceAssessment() {
 
       if (result.reason === SpeechSDK.ResultReason.RecognizedSpeech) {
         const spoken = result.text.replace(/\.$/, '').trim();
+        if (!spoken) {
+          document.getElementById('sentEvalLoading').style.display = 'none';
+          document.getElementById('sentMicStatus').textContent = 'もう少し大きな声でもう一度試してください';
+          recognizer.close();
+          return;
+        }
         document.getElementById('sentMicResult').textContent = `認識: "${spoken}"`;
 
         const pronResult = SpeechSDK.PronunciationAssessmentResult.fromResult(result);
